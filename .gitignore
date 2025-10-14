@@ -1,0 +1,23 @@
+node_modules
+.next
+.env
+.env*.local
+.DS_Store
+
+# TypeScript
+tsconfig.tsbuildinfo
+
+# Testing
+coverage/
+*.lcov
+playwright-report/
+test-results/
+.vitest/
+.playwright/
+
+# Storybook
+*storybook.log
+storybook-static
+
+# Claude
+.claude

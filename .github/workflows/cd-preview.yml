@@ -1,0 +1,65 @@
+name: Vercel Preview Deployment
+
+on:
+  push:
+    branches-ignore:
+      - main
+
+env:
+  NODE_VERSION: '22.x'
+  PNPM_VERSION: '10.x'
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  deploy-preview:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      # リポジトリのコードをチェックアウト
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - run: echo "📥 Code checked out successfully!"
+
+      # 環境と依存関係をセットアップ
+      - name: Setup Environment and Install Dependencies
+        uses: ./.github/actions/setup-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          pnpm-version: ${{ env.PNPM_VERSION }}
+      - run: echo "💾 Dependencies installed successfully!"
+
+      # Vercel CLIをインストール
+      - name: Install Vercel CLI
+        run: pnpm add --global vercel@latest
+      - run: echo "✅ Vercel CLI installed successfully!"
+
+      # プレビュー環境の情報をプル
+      - name: Pull Vercel Environment Information
+        run: vercel pull --yes --environment=preview --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+      - run: echo "✅ Vercel environment information pulled successfully!"
+
+      # プレビュー環境のビルド
+      - name: Build Project Artifacts
+        run: |
+          echo "🏗️ Building project for preview..."
+          vercel build --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+      - run: echo "✅ Project built successfully!"
+
+      # プレビュー環境にデプロイ
+      - name: Deploy Project Artifacts to Vercel
+        run: |
+          echo "🚀 Deploying project to preview..."
+          vercel deploy --prebuilt --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+      - run: echo "✅ Project deployed successfully!"
