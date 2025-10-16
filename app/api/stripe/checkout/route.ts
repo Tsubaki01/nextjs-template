@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerUser } from '@/lib/auth/server';
 import { getStripe, STRIPE_PRICE_ID } from '@/lib/stripe';
-import { prisma } from '@/lib/prisma';
+import { db } from '@/lib/drizzle';
+import { subscription } from '@/drizzle/schema';
+import { eq } from 'drizzle-orm';
 
 export async function POST(req: NextRequest) {
   try {
@@ -15,20 +17,13 @@ export async function POST(req: NextRequest) {
 
     // 既存のカスタマーを確認
     let customerId: string | undefined;
-    let existingSubscription: { stripeCustomerId: string } | null = null;
-    try {
-      existingSubscription = await prisma.subscription.findFirst({
-        where: { userId: user.id },
-        select: { stripeCustomerId: true },
-      });
-    } catch (e) {
-      // 例: 初回起動でテーブル未作成でもエラーにせず続行（Checkout 自体は可能）
-      console.warn(
-        'Skip prisma lookup for subscription (likely no table yet):',
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- エラーオブジェクトの型が不完全
-        (e as any)?.message || e
-      );
-    }
+    const result = await db
+      .select({ stripeCustomerId: subscription.stripeCustomerId })
+      .from(subscription)
+      .where(eq(subscription.userId, user.id))
+      .limit(1);
+
+    const existingSubscription = result[0];
 
     if (existingSubscription) {
       customerId = existingSubscription.stripeCustomerId;

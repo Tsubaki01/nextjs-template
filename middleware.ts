@@ -1,10 +1,55 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getStackServerApp } from '@/lib/stack';
 
+// --- CSRF: ヘルパー関数群（Next.js v15推奨のシンプルな検証方針） ---
+const isStateChangingMethod = (method: string): boolean => !['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase());
+
+const normalizeOrigin = (origin: string): string => {
+  // 末尾のスラッシュを削除して正規化
+  return origin.replace(/\/+$/, '');
+};
+
+const parseAllowedOrigins = (): string[] => {
+  const csv = (process.env.NEXT_PUBLIC_APP_ORIGINS || '').trim();
+  const single = (process.env.NEXT_PUBLIC_APP_ORIGIN || '').trim();
+
+  // 両方の環境変数でカンマ区切りをサポート
+  const list = [
+    ...(csv ? csv.split(',').map((s) => s.trim()).filter(Boolean) : []),
+    ...(single ? single.split(',').map((s) => s.trim()).filter(Boolean) : []),
+  ];
+
+  // 末尾のスラッシュを正規化
+  return Array.from(new Set(list.map(normalizeOrigin)));
+};
+
+const getOriginFromRequest = (request: NextRequest): string | null => {
+  const origin = request.headers.get('origin');
+  if (origin) return origin;
+  const referer = request.headers.get('referer');
+  if (!referer) return null;
+  try {
+    return new URL(referer).origin;
+  } catch {
+    return null;
+  }
+};
+
+const isAllowedByFetchMetadata = (request: NextRequest): boolean => {
+  // Fetch Metadata Resource Isolation: same-origin / same-site / none を許可
+  // - none: ブックマークや直接URL入力など、ブラウザUIからの直接アクセス
+  // - same-origin: 同一オリジンからのリクエスト
+  // - same-site: 同一サイトからのリクエスト
+  // ヘッダ非搭載ブラウザ互換のため、未送信時は許可
+  const secFetchSite = request.headers.get('sec-fetch-site');
+  if (!secFetchSite) return true;
+  return secFetchSite === 'same-origin' || secFetchSite === 'same-site' || secFetchSite === 'none';
+};
+
 /**
  * Next.js のmiddleware関数。
  *
- * - /api/配下のAPIルートに対し、CSRF対策としてOrigin/Referer/Sec-Fetch-Siteを検証し、不正なクロスサイトリクエストを拒否します。
+ * - /api/配下のAPIルートに対し、CSRF対策として Origin / Referer と Fetch Metadata(Sec-Fetch-Site) を検証します。
  * - /handler/password-resetを、独自のパスワードリセットページにリダイレクトします（ただしresumeフラグを除く）。
  * - /dashboard, /billing配下へのアクセス時、Stack Authでログイン済みかどうかを確認し、未ログインならサインアップページへリダイレクトします。
  *
@@ -16,43 +61,73 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
 
   // --- APIルートへのCSRF対策 ---
   if (pathname.startsWith('/api/')) {
-    const method = request.method.toUpperCase();
-    // 安全でないメソッド時のみCSRFチェックを行う
-    if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-      // 許可されたオリジン: 環境変数のみを使用（Hostヘッダは信用しない）
-      const allowedOrigin = (process.env.NEXT_PUBLIC_APP_ORIGIN || '').trim();
-      if (!allowedOrigin) {
-        console.error('Missing required env: NEXT_PUBLIC_APP_ORIGIN');
-        return new NextResponse('Server misconfiguration', { status: 500 });
-      }
+    const method = request.method;
+    if (isStateChangingMethod(method)) {
+      const isDev = process.env.NODE_ENV !== 'production';
+      const allowedOrigins = parseAllowedOrigins();
+
+      // デバッグログ（本番環境でも出力して問題を特定）
+      const secFetchSite = request.headers.get('sec-fetch-site');
       const origin = request.headers.get('origin');
       const referer = request.headers.get('referer');
-      const secFetchSite = request.headers.get('sec-fetch-site');
+      console.log('[CSRF Debug]', {
+        pathname,
+        method,
+        secFetchSite,
+        origin,
+        referer,
+        allowedOrigins,
+        isDev,
+        envDebug: {
+          NEXT_PUBLIC_APP_ORIGINS: process.env.NEXT_PUBLIC_APP_ORIGINS,
+          NEXT_PUBLIC_APP_ORIGIN: process.env.NEXT_PUBLIC_APP_ORIGIN,
+        },
+      });
 
-      // Sec-Fetch-Siteヘッダーが存在する場合は「same-origin」のみ許可
-      if (secFetchSite && secFetchSite !== 'same-origin') {
-        // same-origin 以外（same-site を含む）は拒否
-        return new NextResponse('Forbidden (CSRF: not same-origin)', { status: 403 });
+      if (!isAllowedByFetchMetadata(request)) {
+        console.error('[CSRF] Blocked by Fetch Metadata', { secFetchSite });
+        return new NextResponse('Forbidden (CSRF: blocked by Fetch Metadata)', { status: 403 });
       }
 
-      // Originヘッダー優先で検証（なければRefererのoriginを利用）
-      if (origin) {
-        if (origin !== allowedOrigin) {
-          return new NextResponse('Forbidden (CSRF: origin mismatch)', { status: 403 });
+      if (allowedOrigins.length === 0) {
+        if (!isDev) {
+          console.error('Missing required env: NEXT_PUBLIC_APP_ORIGIN or NEXT_PUBLIC_APP_ORIGINS');
+          return new NextResponse('Server misconfiguration', { status: 500 });
         }
-      } else if (referer) {
-        try {
-          const refOrigin = new URL(referer).origin;
-          if (refOrigin !== allowedOrigin) {
-            return new NextResponse('Forbidden (CSRF: referer mismatch)', { status: 403 });
-          }
-        } catch {
-          // Refererヘッダーのパースに失敗した場合も拒否
-          return new NextResponse('Forbidden (CSRF: bad referer)', { status: 403 });
+        // 開発では厳密なオリジン指定が未設定でも続行
+        return NextResponse.next();
+      }
+
+      const candidateOrigin = getOriginFromRequest(request);
+      if (!candidateOrigin) {
+        if (!isDev) {
+          console.error('[CSRF] No Origin/Referer header');
+          return new NextResponse('Forbidden (CSRF: no Origin/Referer)', { status: 403 });
         }
-      } else {
-        // Origin/Refererどちらも存在しない場合は、保守的に拒否
-        return new NextResponse('Forbidden (CSRF: no origin)', { status: 403 });
+        return NextResponse.next();
+      }
+
+      // Origin比較時も正規化して比較
+      const normalizedCandidateOrigin = normalizeOrigin(candidateOrigin);
+      const requestOrigin = normalizeOrigin(new URL(request.url).origin);
+      const isAllowedByEnv = allowedOrigins.includes(normalizedCandidateOrigin);
+      const isAllowedByRequestOriginInDev = isDev && normalizedCandidateOrigin === requestOrigin;
+
+      console.log('[CSRF Origin Check]', {
+        candidateOrigin,
+        normalizedCandidateOrigin,
+        requestOrigin,
+        isAllowedByEnv,
+        isAllowedByRequestOriginInDev,
+      });
+
+      if (!isAllowedByEnv && !isAllowedByRequestOriginInDev) {
+        console.error('[CSRF] Origin mismatch', {
+          normalizedCandidateOrigin,
+          allowedOrigins,
+          requestOrigin,
+        });
+        return new NextResponse('Forbidden (CSRF: origin mismatch)', { status: 403 });
       }
     }
   }

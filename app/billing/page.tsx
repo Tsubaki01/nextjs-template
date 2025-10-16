@@ -153,15 +153,15 @@ export default function BillingPage() {
         },
       });
 
-      const data = await response.json();
-
       if (!response.ok) {
-        setErrorMessage(data.error || 'エラーが発生しました');
+        const data = await response.json().catch(() => ({} as any));
+        setErrorMessage((data as any)?.error || 'エラーが発生しました');
         return;
       }
 
-      if (data.url) {
-        window.location.href = data.url;
+      const { url } = (await response.json().catch(() => ({} as any))) as { url?: string };
+      if (url) {
+        window.location.href = url;
       } else {
         setErrorMessage('ポータルURLが取得できませんでした');
       }

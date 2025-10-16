@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerUser } from '@/lib/auth/server';
 import { getStripe } from '@/lib/stripe';
-import { prisma } from '@/lib/prisma';
+import { db } from '@/lib/drizzle';
+import { subscription } from '@/drizzle/schema';
+import { eq } from 'drizzle-orm';
 
 export async function POST(_req: NextRequest) {
   try {
@@ -12,11 +14,15 @@ export async function POST(_req: NextRequest) {
     }
 
     // ユーザーのサブスクリプション情報を取得
-    const subscription = await prisma.subscription.findFirst({
-      where: { userId: user.id },
-    });
+    const result = await db
+      .select()
+      .from(subscription)
+      .where(eq(subscription.userId, user.id))
+      .limit(1);
 
-    if (!subscription?.stripeCustomerId) {
+    const sub = result[0];
+
+    if (!sub?.stripeCustomerId) {
       return NextResponse.json({ error: 'サブスクリプションが見つかりません' }, { status: 404 });
     }
 
@@ -27,7 +33,7 @@ export async function POST(_req: NextRequest) {
 
     // Stripeカスタマーポータルセッションを作成
     const portalSession = await getStripe().billingPortal.sessions.create({
-      customer: subscription.stripeCustomerId,
+      customer: sub.stripeCustomerId,
       return_url: returnUrl,
     });
 

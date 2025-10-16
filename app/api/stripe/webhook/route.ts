@@ -4,8 +4,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { headers } from 'next/headers';
 import Stripe from 'stripe';
 import { getStripe } from '@/lib/stripe';
-import { prisma } from '@/lib/prisma';
-import { SubscriptionStatus } from '@prisma/client';
+import { db } from '@/lib/drizzle';
+import { subscription, type Subscription } from '@/drizzle/schema';
+import { eq } from 'drizzle-orm';
 
 // Webhook は常に動的実行にし、キャッシュやプリレンダーを無効化
 export const dynamic = 'force-dynamic';
@@ -51,12 +52,10 @@ async function backfillCurrentPeriodEndWhenMissing(
     const cpe: number | undefined = sub?.current_period_end;
     if (cpe) {
       try {
-        await prisma.subscription.update({
-          where: { userId },
-          data: {
-            currentPeriodEnd: new Date(cpe * 1000),
-          } as any,
-        });
+        await db
+          .update(subscription)
+          .set({ currentPeriodEnd: new Date(cpe * 1000) })
+          .where(eq(subscription.userId, userId));
       } catch {}
       return;
     }
@@ -102,8 +101,7 @@ export async function POST(req: NextRequest) {
           // Stripe の Subscription を取得（リトライで current_period_end 取得を安定化）
           const sub = await retrieveSubscriptionWithRetry(subscriptionId);
 
-          const status =
-            (sub?.status as SubscriptionStatus) || ('incomplete' as SubscriptionStatus);
+          const status = (sub?.status as Subscription['status']) || 'incomplete';
           const currentPeriodEnd = (sub as any)?.current_period_end
             ? new Date(((sub as any).current_period_end as number) * 1000)
             : null;
@@ -113,17 +111,9 @@ export async function POST(req: NextRequest) {
           const cancelAtPeriodEnd = Boolean((sub as any)?.cancel_at_period_end);
 
           try {
-            await prisma.subscription.upsert({
-              where: { userId },
-              update: {
-                stripeCustomerId: customerId,
-                stripeSubscriptionId: subscriptionId,
-                status,
-                currentPeriodEnd,
-                cancelAt,
-                cancelAtPeriodEnd,
-              } as any,
-              create: {
+            await db
+              .insert(subscription)
+              .values({
                 userId,
                 stripeCustomerId: customerId,
                 stripeSubscriptionId: subscriptionId,
@@ -131,27 +121,39 @@ export async function POST(req: NextRequest) {
                 currentPeriodEnd,
                 cancelAt,
                 cancelAtPeriodEnd,
-              } as any,
-            });
+              })
+              .onConflictDoUpdate({
+                target: subscription.userId,
+                set: {
+                  stripeCustomerId: customerId,
+                  stripeSubscriptionId: subscriptionId,
+                  status,
+                  currentPeriodEnd,
+                  cancelAt,
+                  cancelAtPeriodEnd,
+                  updatedAt: new Date(),
+                },
+              });
             // もし currentPeriodEnd が未確定なら、遅延再取得でバックフィル
             if (!currentPeriodEnd) {
               await backfillCurrentPeriodEndWhenMissing(userId, subscriptionId);
             }
           } catch (e: any) {
-            // 一意制約衝突などの場合は既存レコードに対して updateMany でフォールバック
+            // 一意制約衝突などの場合は既存レコードに対して update でフォールバック
             const msg = e?.message || String(e);
             console.warn('Webhook upsert failed; applying fallback update.', msg);
-            await prisma.subscription.updateMany({
-              where: { stripeSubscriptionId: subscriptionId },
-              data: {
+            await db
+              .update(subscription)
+              .set({
                 userId,
                 stripeCustomerId: customerId,
                 status,
                 currentPeriodEnd,
                 cancelAt,
                 cancelAtPeriodEnd,
-              } as any,
-            });
+                updatedAt: new Date(),
+              })
+              .where(eq(subscription.stripeSubscriptionId, subscriptionId));
           }
         }
         break;
@@ -163,10 +165,10 @@ export async function POST(req: NextRequest) {
 
         const cancelAt = sub?.cancel_at ? new Date(sub.cancel_at * 1000) : null;
         const cancelAtPeriodEnd = Boolean(sub?.cancel_at_period_end);
-        await prisma.subscription.updateMany({
-          where: { stripeSubscriptionId: (sub ?? created).id },
-          data: {
-            status: (sub?.status ?? created.status) as SubscriptionStatus,
+        await db
+          .update(subscription)
+          .set({
+            status: (sub?.status ?? created.status) as Subscription['status'],
             currentPeriodEnd: (sub as any)?.current_period_end
               ? new Date(((sub as any).current_period_end as number) * 1000)
               : (created as any).current_period_end
@@ -174,51 +176,58 @@ export async function POST(req: NextRequest) {
                 : null,
             cancelAt,
             cancelAtPeriodEnd,
-          } as any,
-        });
+            updatedAt: new Date(),
+          })
+          .where(eq(subscription.stripeSubscriptionId, (sub ?? created).id));
 
         break;
       }
 
       case 'customer.subscription.updated': {
-        const subscription = event.data.object as Stripe.Subscription;
+        const stripeSubscription = event.data.object as Stripe.Subscription;
 
         // サブスクリプションのステータス/期日/解約予約を更新
-        const cancelAt = subscription.cancel_at ? new Date(subscription.cancel_at * 1000) : null;
-        const cancelAtPeriodEnd = Boolean(subscription.cancel_at_period_end);
-        await prisma.subscription.updateMany({
-          where: { stripeSubscriptionId: subscription.id },
-          data: {
-            status: subscription.status as SubscriptionStatus,
-            currentPeriodEnd: (subscription as any).current_period_end
-              ? new Date((subscription as any).current_period_end * 1000)
+        const cancelAt = stripeSubscription.cancel_at
+          ? new Date(stripeSubscription.cancel_at * 1000)
+          : null;
+        const cancelAtPeriodEnd = Boolean(stripeSubscription.cancel_at_period_end);
+        await db
+          .update(subscription)
+          .set({
+            status: stripeSubscription.status as Subscription['status'],
+            currentPeriodEnd: (stripeSubscription as any).current_period_end
+              ? new Date((stripeSubscription as any).current_period_end * 1000)
               : null,
             cancelAt,
             cancelAtPeriodEnd,
-          } as any,
-        });
+            updatedAt: new Date(),
+          })
+          .where(eq(subscription.stripeSubscriptionId, stripeSubscription.id));
 
         break;
       }
 
       case 'customer.subscription.deleted': {
-        const subscription = event.data.object as Stripe.Subscription;
+        const stripeSubscription = event.data.object as Stripe.Subscription;
 
         // サブスクリプションをキャンセル済みに更新（終了日時・キャンセル実行時刻も保存）
-        const canceledAt = (subscription as any).canceled_at
-          ? new Date((subscription as any).canceled_at * 1000)
+        const canceledAt = (stripeSubscription as any).canceled_at
+          ? new Date((stripeSubscription as any).canceled_at * 1000)
           : null;
         const cpeSeconds =
-          (subscription as any).current_period_end ?? (subscription as any).ended_at ?? null;
-        await prisma.subscription.updateMany({
-          where: { stripeSubscriptionId: subscription.id },
-          data: {
+          (stripeSubscription as any).current_period_end ??
+          (stripeSubscription as any).ended_at ??
+          null;
+        await db
+          .update(subscription)
+          .set({
             status: 'canceled',
             currentPeriodEnd: typeof cpeSeconds === 'number' ? new Date(cpeSeconds * 1000) : null,
             cancelAt: canceledAt,
             cancelAtPeriodEnd: false,
-          } as any,
-        });
+            updatedAt: new Date(),
+          })
+          .where(eq(subscription.stripeSubscriptionId, stripeSubscription.id));
 
         break;
       }
@@ -239,12 +248,13 @@ export async function POST(req: NextRequest) {
             subId
           )) as unknown as Stripe.Subscription;
 
-          await prisma.subscription.updateMany({
-            where: { stripeSubscriptionId: sub.id },
-            data: {
-              status: sub.status as SubscriptionStatus,
-            } as any,
-          });
+          await db
+            .update(subscription)
+            .set({
+              status: sub.status as Subscription['status'],
+              updatedAt: new Date(),
+            })
+            .where(eq(subscription.stripeSubscriptionId, sub.id));
         }
         break;
       }
@@ -262,15 +272,16 @@ export async function POST(req: NextRequest) {
             subId
           )) as unknown as Stripe.Subscription;
 
-          await prisma.subscription.updateMany({
-            where: { stripeSubscriptionId: sub.id },
-            data: {
-              status: sub.status as SubscriptionStatus,
+          await db
+            .update(subscription)
+            .set({
+              status: sub.status as Subscription['status'],
               currentPeriodEnd: (sub as any).current_period_end
                 ? new Date((sub as any).current_period_end * 1000)
                 : null,
-            } as any,
-          });
+              updatedAt: new Date(),
+            })
+            .where(eq(subscription.stripeSubscriptionId, sub.id));
         }
         break;
       }

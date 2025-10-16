@@ -42,19 +42,11 @@ runs:
         key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
     - run: echo "💾 pnpm store cache process succeeded!"
       shell: bash
-    # 依存関係のインストール
+    # 依存関係のインストール（postinstallスクリプトでPrisma Clientも自動生成）
     - run: echo "📦 Starting dependency installation! Enjoy the magic..."
       shell: bash
     - name: Install Dependencies
       run: pnpm install
       shell: bash
-    - run: echo "📦 Dependency installation complete!"
-      shell: bash
-    # Prisma Client の生成
-    - run: echo "🔧 Generating Prisma Client..."
-      shell: bash
-    - name: Generate Prisma Client
-      run: pnpm exec prisma generate
-      shell: bash
-    - run: echo "✅ Prisma Client generation complete!"
+    - run: echo "📦 Dependency installation complete! (Prisma Client auto-generated via postinstall)"
       shell: bash

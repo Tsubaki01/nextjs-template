@@ -7,9 +7,23 @@ const require = createRequire(import.meta.url);
 // 必須環境変数チェック（テスト/CIのユースケースではスキップ可）
 const isTestLike = process.env.NODE_ENV === 'test' || process.env.VITEST || process.env.PLAYWRIGHT;
 if (!isTestLike) {
-  const appOrigin = (process.env.NEXT_PUBLIC_APP_ORIGIN || '').trim();
-  if (!appOrigin) {
-    throw new Error('Missing required env NEXT_PUBLIC_APP_ORIGIN. Set it to your site origin, e.g. https://example.com');
+  const single = (process.env.NEXT_PUBLIC_APP_ORIGIN || '').trim();
+  const csv = (process.env.NEXT_PUBLIC_APP_ORIGINS || '').trim();
+  const list = [
+    ...(
+      csv
+        ? csv
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : []
+    ),
+    ...(single ? [single] : []),
+  ];
+  if (list.length === 0) {
+    throw new Error(
+      'Missing required env NEXT_PUBLIC_APP_ORIGIN or NEXT_PUBLIC_APP_ORIGINS. Set your site origin(s), e.g. https://example.com or CSV.'
+    );
   }
 }
 

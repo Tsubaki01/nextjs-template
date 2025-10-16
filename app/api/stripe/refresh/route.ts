@@ -1,17 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerUser } from '@/lib/auth/server';
-import { prisma } from '@/lib/prisma';
+import { db } from '@/lib/drizzle';
+import { subscription, type Subscription } from '@/drizzle/schema';
+import { eq } from 'drizzle-orm';
 import { getStripe, extractCurrentPeriodEndSeconds } from '@/lib/stripe';
-import { SubscriptionStatus } from '@prisma/client';
 
 export async function POST(_req: NextRequest) {
   try {
     const user = await getServerUser();
     if (!user) return NextResponse.json({ error: '認証が必要です' }, { status: 401 });
 
-    const local = await prisma.subscription.findFirst({
-      where: { userId: user.id },
-    });
+    const result = await db
+      .select()
+      .from(subscription)
+      .where(eq(subscription.userId, user.id))
+      .limit(1);
+
+    const local = result[0];
+
     if (!local?.stripeSubscriptionId) {
       return NextResponse.json({ error: 'サブスクリプションが見つかりません' }, { status: 404 });
     }
@@ -24,17 +30,24 @@ export async function POST(_req: NextRequest) {
     const cancelAt = remote.cancel_at ? new Date(remote.cancel_at * 1000) : null;
     const cancelAtPeriodEnd = Boolean(remote.cancel_at_period_end);
 
-    const saved = await prisma.subscription.update({
-      where: { id: local.id },
-      data: {
-        status: remote.status as SubscriptionStatus,
+    await db
+      .update(subscription)
+      .set({
+        status: remote.status as Subscription['status'],
         currentPeriodEnd,
         cancelAt,
         cancelAtPeriodEnd,
-      },
-    });
+        updatedAt: new Date(),
+      })
+      .where(eq(subscription.id, local.id));
 
-    return NextResponse.json({ subscription: saved });
+    const updated = await db
+      .select()
+      .from(subscription)
+      .where(eq(subscription.id, local.id))
+      .limit(1);
+
+    return NextResponse.json({ subscription: updated[0] });
   } catch (error) {
     console.error('Refresh subscription error:', error);
     return NextResponse.json({ error: '更新に失敗しました' }, { status: 500 });
